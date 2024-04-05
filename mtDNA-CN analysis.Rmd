@@ -1,0 +1,180 @@
+---
+title: "mtDNA-CN analysis"
+author: "Siyu Pan"
+date: "2024/4/5"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn =-1)
+```
+# 1.Introduction
+Mitochondria are essential organelles in human cells, playing pivotal roles in cellular processes such as respiration, apoptosis regulation, and lipid metabolism. Cells contain a variable number of mitochondria. The total number of copies of mtDNA per cell (mtDNA-CN) varies widely depending on multiple factors, such as age, gender and tissue. This study utilizes simulated data to explore and delineate the differences in mtDNA-CN across these diverse factors, offering insights into the complex dynamics of mitochondrial genetics.
+
+# 2.Data Simulation
+```{r data-simulation}
+# Non-normally distributed data of mtDNA-CN were constructed by combinatorial effects. mtDNA-CN was affected by age, gender, initial DNA concentration, and sequencing plates (random effect). Among them, females are expected to be more strongly affected by age in Muscle.
+# Setting seeds to ensure reproducible results.
+set.seed(123)
+# Sample size
+n <- 2000
+# Age
+ages <- sample(18:80, n, replace = TRUE)
+# Gender
+gender <- sample(c("Male", "Female"), n, replace = TRUE, prob = c(0.5, 0.5))
+# Group
+groups <- sample(c("Muscle", "Liver"), n, replace = TRUE, prob = c(0.5, 0.5))
+# Sequencing plate
+plates <- factor(sample(1:6, n, replace = TRUE))
+# DNA concentration, Including some missing values with 3%
+dna_conc <- runif(n, 2, 6)
+# The basic effect by creating a linear model
+# dna_conc, initial DNA concentration
+base_effect <- sample(300:400,1,replace = T) - 0.01 * ages + 0.2 * dna_conc
+# Gender effect of Female
+gender_effect <- ifelse(gender == 'Female', 12, 0)
+# A big age effect, only among women in Muscle
+age_effect <- ifelse(groups == 'Muscle' & gender == 'Female', -0.3 * ages, 0)
+# Adding additional effects of elder.
+additional_age_effect <- ifelse(ages > 55, -0.6 * (ages - 55), 0)
+# Adding random effects and noise.
+plate_effect <- rnorm(length(levels(plates)), 0, 5)
+noise <- rnorm(n, 0, 5)
+# Creating complex distributions for mtDNA_CN. 
+mtDNA_CN <- base_effect + gender_effect + age_effect + plate_effect[plates] + additional_age_effect + noise
+data <- data.frame(Group = groups,mtDNA_CN = mtDNA_CN, Age = ages, Gender = gender, Plate = plates, DNAConc = dna_conc)
+```
+
+# 3.Data Processing
+```{r Data processing}
+
+# Removing outliers other than the 3sd differences
+CN_mean <- mean(data$mtDNA_CN)
+CN_sd <- sd(data$mtDNA_CN)
+data <- data[data$mtDNA_CN >= CN_mean-3*CN_sd & data$mtDNA_CN <= CN_mean+3*CN_sd,]
+# dummy variates, plates
+data$Plate <- as.factor(data$Plate)
+dummy_vars_plate <- model.matrix(~ Plate - 1, data = data)
+data <- cbind(data, dummy_vars_plate)
+data$Plate6 <- NULL
+head(data)
+```
+
+# 4.Data Analysis
+```{r Statistical test - 1.Normal distribution test}
+# 1. Normal distribution test
+# Failure to meet the normal distribution test (P = 5.47e-06).
+shapiro.test(data$mtDNA_CN)
+# Data transformation to normal distribution, such as log transformation or Inverse Normal Transformation
+# Inverse Normal Transformation
+get_inv_norm <- function(x){
+  x.qnorm <- rep(NA, length(x))
+  x.qnorm[!is.na(x)] <- qnorm((rank(x[!is.na(x)]) - 0.5) / length(x[!is.na(x)]))
+  x.qnorm
+}
+data$mtDNA_CN_INT<- get_inv_norm(data$mtDNA_CN)
+# Check the distribution
+shapiro.test(data$mtDNA_CN_INT)
+```
+
+```{r Statistical test - 2.correlation anaysis and adjust technique effects}
+# Correlation implied that corrections required for technical effects including plates and DNA concentration 
+suppressPackageStartupMessages(library(corrplot))
+# Male coded as 1, Female coded as 2
+data$Gender <- ifelse(data$Gender == "Male",1,2)
+# Correlation matrix
+cor_matrix <- cor(subset(data, select = -c(Group,Plate)), method = "pearson")
+# Heat plot
+corrplot(cor_matrix, method = 'square',sig.level = 0.05,insig = "label_sig", pch.cex = 0.9, pch.col = 'grey20',col=rev(COL2('RdBu', 200)))
+
+# Adjusted technique effects by creating a mixed linear model where Plates are used as a random effect
+suppressPackageStartupMessages(library(lme4))
+model_lmm <- lmer(mtDNA_CN_INT ~  DNAConc + (1 | Plate), data = data)
+summary(model_lmm)
+# Obstaining the residual
+data$mtDNA_CN_INT_residual <- residuals(model_lmm)
+```
+
+```{r Statistical test - 3.compare mtDNA-CN differences in different tissues}
+# t-test or wilcox test was used to compare mtDNA-CN differences between Muscle and Liver.
+# Muscle has significantly more mtDNA-CN than Liver with t test and wilcox test.
+t.test(mtDNA_CN_INT_residual ~ Group, data = data)
+wilcox.test(mtDNA_CN_INT_residual ~ Group, data = data)
+# Density Plot of mtDNA-CN by Group (tissue)
+suppressPackageStartupMessages(library(ggplot2))
+ggplot(data, aes(x = mtDNA_CN_INT_residual, fill = Group)) + 
+  geom_density(alpha = 0.5) +
+  theme_bw() +
+  labs(title = "Density Plot of mtDNA-CN by Group",
+       x = "mtDNA-CN",
+       y = "Density") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  scale_fill_brewer(palette = "Set1") 
+# Density Plot of mtDNA-CN by Gender
+ggplot(data, aes(x = mtDNA_CN_INT_residual, fill = factor(Gender))) + 
+  geom_density(alpha = 0.5) +
+  theme_bw() +
+  labs(title = "Density Plot of mtDNA-CN by Gender",
+       x = "mtDNA-CN",
+       y = "Density") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+   scale_fill_brewer(palette = "Set1", name = "Gender", labels = c("Male", "Female"))
+```
+
+```{r Statistical test - 4.compare mtDNA-CN differences in different gender}
+# Differences in mtDNA-CN in different gender by group
+# Compared to muscle, mtDNA-CN was significantly higher in females than males in Liver using t test and wilcox test
+t.test(mtDNA_CN_INT_residual ~ Gender, data = data[data$Group == "Liver",])
+wilcox.test(mtDNA_CN_INT_residual ~ Gender, data = data[data$Group == "Liver",])
+t.test(mtDNA_CN_INT_residual ~ Gender, data = data[data$Group == "Muscle",])
+wilcox.test(mtDNA_CN_INT_residual ~ Gender, data = data[data$Group == "Muscle",])
+# Faceted box plots by group and gender 
+ggplot(data = data, aes(x = Group)) +
+  geom_boxplot(alpha=0.8, aes(y=mtDNA_CN_INT_residual, fill=factor(Gender))) +
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank()) + 
+  xlab("Tissue") + ylab("mtDNA-CN") + labs(fill = "Gender") + scale_fill_discrete(labels=c("Male","Female"))
+```
+
+```{r Statistical test - 5.Relationship between age and mtDNA-CN}
+
+# Relationship between age and mtDNA-CN,some possible nonlinear relationships were observed.
+model <- lm(mtDNA_CN_INT_residual ~ Age,data=data)
+# Age had a strong effect on mtDNA-CN, explaining the greater mtDNA-CN variance
+summary(model)
+# Looking for knots
+suppressPackageStartupMessages(library(earth))
+suppressPackageStartupMessages(library(splines))
+mars_model <- earth(mtDNA_CN_INT_residual ~ Age, data=data)
+# The possible knot is 54
+summary(mars_model)
+spline_model <- lm(mtDNA_CN_INT_residual ~ bs(Age, knots=54), data=data)
+# Obtaining predicted mtDNA
+predict_cn<- predict(spline_model,list(Age=sort(data$Age)),se=T)
+# Scatter plot and fitted lines
+plot(data$Age, data$mtDNA_CN_INT_residual, main="Linear Spline Model", xlab="Age", ylab="mtDNA-CN")
+# Liner mode
+abline(model, col="green", lwd=2)
+# Linear Spline Model
+lines(sort(data$Age), predict_cn$fit, col="red",lwd=2)
+```
+```{r Statistical test - 6. Relationship between age and mtDNA-CN under multiple feactors}
+suppressPackageStartupMessages(library(ggpmisc))
+data$Gender <- factor(data$Gender, levels = c(1, 2), labels = c("Male", "Female"))
+ggplot(data, aes(x = Age, y = mtDNA_CN_INT_residual)) +
+  geom_point() +  
+  theme_bw() + 
+  geom_smooth(method = "lm",formula = y~x, se = FALSE, color = "blue") +
+  facet_grid(Group ~ Gender) +
+  stat_poly_eq(aes(label = paste(after_stat(eq.label),sep = "~~~")), formula = y~x, parse = TRUE,size = 3)  + 
+  stat_fit_glance(method = 'lm',method.args = list(formula = y ~ x), geom = 'text',aes(label = paste("P-value = ", signif(after_stat(p.value), digits = 2), sep = "")), label.x.npc = 'right', size = 3) + 
+  labs(title = "Age vs mtDNA-CN by Group and Gender",y = "mtDNA-CN")
+```
+
+# 4.Conclusions
+From the analysis of the simulated data, we observe that:
+1. Mean mtDNA-CN was significantly higher in females than in males, highlighting women may have a greater need for energy.
+2. Mean mtDNA-CN in liver tissue is considerably higher than in muscle tissue, potentially indicating varying mtDNA copy number requirements across different types of tissues.
+3. mtDNA-CN showed a decreasing trend with age throughout the sample. Notably, mtDNA-CN declined more rapidly after age 54, suggesting a concern for the body's energy metabolism.
+4. The age effect was greater in Muscle in females, and changes in mtDNA-CN were more significantly with age, indicating that both age and gender may collaboratively affect mtDNA-CN levels, especially in specific tissue types.
+
